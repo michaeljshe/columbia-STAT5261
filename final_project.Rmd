@@ -1,0 +1,472 @@
+---
+title: "Midterm Project"
+author: "Michael She"
+date: "6/12/2019"
+output: 
+  html_document: 
+    highlight: tango
+    theme: flatly
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+source('model.r')
+```
+
+# Read
+
+```{r}
+# df_raw <- readRDS('cache/short_history.rds')
+# df_raw <- readRDS('cache/partial_history.rds')
+df_raw <- readRDS('cache/full_history.rds')
+df_benchmark <- read_sp()
+```
+
+# Data Cleaning
+
+Identify a subset of assets which contains at least 10 years of price data for all the assets during the same time period. Each asset can have up to 5% missing values.
+
+One of your colleagues reported to me that there are over 4000 assets which have the most recent 10 years of data. Therefore, do not search for the largest 10 year sub period in the whole data.
+
+For the analysis in the midterm project, please use the last 10 years (252*10 days) of the data for the assets with at most 5% missing values.
+
+Make sure that these missing values are not clustered too much, e.g., more than 10 days of missing values in a raw. If they cluster for some asset, then remove that asset from your sample too.
+
+Compute daily log-returns for the data in (1) using adjusted-close prices. Detect and replace the outliers and missing values with estimates that are more consistent with the majority of the data, use, e.g.,
+
+Fill up the missing values on the price data. Then compute the returns and correct the outliers in the returns series.
+
+
+```{r}
+df_universe <- df_raw %>% define_universe()
+df_clean <- df_universe %>% clean_universe()
+# df_clean %>% saveRDS('cache/full_history_clean.rds')
+# df_clean <- readRDS('cache/full_history_clean.rds')
+```
+
+
+```{r}
+df_missing %>% 
+    ggplot() +
+    geom_histogram(aes(x = count_missing)) +
+    labs(title = "Histogram of Count of Missing Observations")
+```
+
+```{r}
+df_missing %>% 
+    ggplot() +
+    geom_histogram(aes(x = percentage_missing)) +
+    labs(title = "Histogram of Percentage of Missing Observations")
+```
+
+```{r}
+df_missing %>% 
+    ggplot() +
+    geom_histogram(aes(x = max_consecutive_missing)) +
+    labs(title = "Histogram of Maximum Consecutive Missing Observations")
+```
+
+
+```{r}
+ggplot() +
+    geom_line(data = df_raw[, .N, by = date], mapping = aes(x = date, y = N, color = "Full Universe")) +
+    geom_line(data = df_universe[, .N, by = date], mapping = aes(x = date, y = N, color = "Filtered Universe")) +
+    labs(title = "Number of Stocks by Date in Full vs. Filtered Universe")
+```
+
+```{r}
+df_clean %>% 
+    ggplot() +
+    geom_histogram(aes(x = log_return)) +
+    labs(title = "Histogram of Log Returns")
+```
+
+```{r}
+if (any(df_clean$has_adjclose_outlier)) {
+    df_clean %>%
+        .[has_adjclose_outlier == TRUE] %>%
+        .[symbol %in% sample(symbol, 5)] %>%
+        ggplot() +
+        geom_point(aes(x = date, y = adjclose, color = "Raw")) +
+        geom_line(aes(x = date, y = adjclose, color = "Raw")) +
+        geom_point(aes(x = date, y = clean_adjclose, color = "Clean"), position = position_nudge(x = 0.5, y = 0)) +
+        geom_line(aes(x = date, y = clean_adjclose, color = "Clean"), position = position_nudge(x = 0.5, y = 0)) +
+        facet_wrap(~symbol, ncol = 1, scales = "fixed") +
+        labs(title = "Raw vs. Clean Prices", color = "State") +
+        scale_y_continuous(labels = scales::dollar)
+}
+```
+
+
+```{r}
+if (any(df_clean$has_log_return_outlier)) {
+    df_clean %>%
+        .[has_log_return_outlier == TRUE] %>%
+        .[symbol %in% sample(symbol, 5)] %>%
+        ggplot() +
+        geom_point(aes(x = date, y = log_return, color = "Raw")) +
+        geom_point(aes(x = date, y = clean_log_return, color = "Clean"), position = position_nudge(x = 0.5, y = 0)) +
+        facet_wrap(~symbol, ncol = 1, scales = "fixed") +
+        labs(title = "Raw vs. Clean Log Returns", color = "State") +
+        scale_y_continuous(labels = scales::percent)
+}
+```
+
+# Signal Generation
+
+Perform a portfolio optimization with modifications of your choice using the cleaned. data from (3). Your portfolio analysis should demonstrate the out-of-sample performance of your method. In particular, you should use a rolling window approach.
+
+```{r}
+all_dates <- df_clean[, date %>% unique() %>% sort()]
+min_date <- min(all_dates)
+max_date <- max(all_dates)
+
+start_date <- min_date + days(rolling_window_lengths) + 1
+end_date <- max_date - days(horizon_lengths) - 1
+
+rolling_dates <- all_dates[all_dates %between% c(start_date, end_date)] %>%
+    (function(x) x[seq_along(x) %% horizon_lengths == 0]) %>%
+    sort()
+
+log_dates <- data.table(date = rolling_dates) %>%
+    .[, list(date = max(date)), by = lubridate::floor_date(date, unit = "year")] %>%
+    .[, unique(date)] %>%
+    c(start_date, ., end_date) %>%
+    sort()
+
+first_date <- min(rolling_dates)
+last_date <- max(rolling_dates)
+```
+
+```{r}
+df_prepared <- prepare_market_returns(df_clean)
+
+# df_prepared %>% saveRDS('cache/full_history_prepared.rds')
+# df_prepared <- readRDS("cache/full_history_prepared.rds")
+
+model_signals <- estimate_signals(df_prepared)
+
+# model_signals %>% saveRDS('cache/full_history_signal_model.rds')
+# model_signals <- readRDS('cache/full_history_signal_model.rds')
+
+df_signals <- model_signals$df_signals
+df_ff_betas <- model_signals$df_ff_betas
+df_ff_returns <- model_signals$df_ff_returns
+df_ff_estimated_returns <- model_signals$df_ff_estimated_returns
+df_ff_estimated_correlations <- model_signals$df_ff_estimated_correlations
+df_estimated_return <- model_signals$df_estimated_return
+df_estimated_variance <- model_signals$df_estimated_variance
+```
+
+```{r}
+df_signals %>%
+    .[date == last_date] %>%
+    select_top_bottom("estimated_mean", 20) %>%
+    ggplot() +
+    geom_bar(aes(x = symbol %>% reorder(estimated_mean), y = estimated_mean), stat = "identity", position = "dodge") +
+    labs(title = "Estimated Mean") +
+    scale_y_continuous(labels = scales::percent)
+
+df_signals %>%
+    .[date == last_date] %>%
+    select_sample("symbol", 40) %>%
+    .[j = list(
+      symbol,
+      Total = estimated_vol,
+      Factor = estimated_factor_vol_factor_model,
+      Idiosyncratic = estimated_idiosyncratic_vol_factor_model
+    )] %>%
+    melt.data.table(
+      id.vars = c("symbol"), measure.vars = c("Total", "Factor", "Idiosyncratic"),
+      variable.name = "volatility_type", value.name = "estimated_vol"
+    ) %>%
+    ggplot() +
+    geom_bar(
+      aes(x = symbol %>% reorder(estimated_vol), y = estimated_vol, fill = volatility_type),
+      stat = "identity", position = "dodge"
+    ) +
+    facet_grid(volatility_type ~ .) +
+    labs(
+      title = "Estimated Volatlity from Factor Model",
+      subtitle = glue("Sample of Total, Factor and Idiosyncratic Volatility on {last_date}"),
+      x = "Symbol",
+      y = "Estimated Volatility",
+      fill = "Volatility Decomposition"
+    ) + 
+    scale_y_continuous(labels = scales::percent) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+
+df_signals %>%
+    .[date == last_date] %>%
+    select_top_bottom("estimated_sharpe", 20) %>%
+    ggplot() +
+    geom_bar(aes(x = symbol %>% reorder(estimated_sharpe), y = estimated_sharpe), stat = "identity", position = "dodge") +
+    labs(
+      title = "Estimated Sharpe",
+      subtitle = glue("Largest and Smallest Estimated Sharpe on {last_date}"),
+      x = "Symbol",
+      y = "Estimated Sharpe"
+    ) + 
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.01, decimals = 2)) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+
+df_signals %>%
+    .[date == last_date] %>%
+    select_top_bottom("estimated_factor_vol_factor_model", 20) %>%
+    ggplot() +
+    geom_bar(aes(x = symbol %>% reorder(estimated_factor_vol_factor_model), y = estimated_factor_vol_factor_model), stat = "identity", position = "dodge") +
+    labs(title = "Estimated Factor Vol") +
+    scale_y_continuous(labels = scales::percent)
+
+df_signals %>%
+    .[date == last_date] %>%
+    select_top_bottom("estimated_idiosyncratic_vol_factor_model", 20) %>%
+    ggplot() +
+    geom_bar(aes(x = symbol %>% reorder(estimated_idiosyncratic_vol_factor_model), y = estimated_idiosyncratic_vol_factor_model), stat = "identity", position = "dodge") +
+    labs(title = "Estimated Idiosyncratic Vol") +
+    scale_y_continuous(labels = scales::percent)
+```
+
+```{r}
+df_ff_betas %>%
+    .[date == last_date] %>%
+    select_sample("symbol", 50) %>%
+    ggplot() +
+    geom_bar(aes(x = symbol %>% reorder(factor_beta), y = factor_beta, fill = term), stat = "identity", position = "dodge") +
+    facet_grid(term ~ ., scales = "free") +
+    labs(
+      title = "Estimated Fama French Factor Betas",
+      subtitle = glue("Sample of Estimated Market, Momentum and Size Betas on {last_date}"),
+      x = "Symbol",
+      y = "Estimated Beta",
+      fill = "Risk Factor"
+    ) +
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.01)) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+```
+
+```{r}
+test_symbol <- c("AAPL", "MSFT", "GOOGL")
+
+df_signals %>%
+    .[symbol %in% test_symbol] %>%
+    ggplot() +
+    geom_point(aes(x = date, y = estimated_mean, color = "Estimated")) +
+    geom_point(aes(x = date, y = realized_mean, color = "Realized")) +
+    facet_wrap(~symbol, ncol = 1, scales = "fixed") +
+    labs(title = "Estimated Mean") +
+    scale_y_continuous(labels = scales::percent)
+
+df_signals %>%
+    .[symbol %in% test_symbol] %>%
+    .[!is.na(estimated_vol)] %>%
+    ggplot() +
+    geom_line(aes(x = date, y = estimated_vol, color = "Estimated"), size = 1) +
+    geom_line(aes(x = date, y = realized_vol, color = "Realized"), size = 1) +
+    facet_wrap(~symbol, ncol = 1, scales = "fixed") +
+    labs(
+      title = "Estimated and Realized Volatility",
+      subtitle = glue("Time Series of Estiamted vs. Realized Volatility for {paste(test_symbol, collapse = ', ')}"),
+      x = "Date",
+      y = "Volatility",
+      color = "Estimated vs. Realized"
+    ) +
+    scale_y_continuous(labels = scales::percent)
+
+df_ff_betas %>%
+    .[symbol %in% test_symbol] %>%
+    ggplot() +
+    geom_line(aes(x = date, y = factor_beta, color = term), size = 1) +
+    facet_wrap(~symbol, ncol = 1, scales = "fixed") +
+    labs(
+      title = "Estimated Factor Betas",
+      subtitle = glue("Time Series of Estiamted Factor Betas for {paste(test_symbol, collapse = ', ')}"),
+      x = "Date",
+      y = "Volatility",
+      color = "Estimated vs. Realized"
+    ) +
+    scale_y_continuous(labels = scales::number_format(accuracy = 0.01))
+```
+
+```{r}
+df_signals %>%
+    .[symbol %in% sample(symbol, 5, replace = FALSE)] %>%
+    ggplot() +
+    geom_point(aes(x = estimated_mean, y = realized_mean, color = symbol)) +
+    geom_abline(intercept = 0, slope = 1, linetype = 2) +
+    labs(title = "Estimated Mean") +
+    scale_x_continuous(labels = scales::percent) +
+    scale_y_continuous(labels = scales::percent)
+
+df_signals %>%
+    .[symbol %in% sample(symbol, 5, replace = FALSE)] %>%
+    ggplot() +
+    geom_point(aes(x = estimated_vol, y = realized_vol, color = symbol)) +
+    geom_abline(intercept = 0, slope = 1, linetype = 2) +
+    labs(title = "Estimated Volatility") +
+    scale_x_continuous(labels = scales::percent) +
+    scale_y_continuous(labels = scales::percent)
+```
+
+
+```{r}
+df_ff_estimated_returns %>%
+  ggplot() +
+  geom_line(aes(x = date, y = factor_mean, color = term, group = term)) +
+  geom_hline(data = df_ff_estimated_returns[, nan_mean(factor_mean), by = term], aes(yintercept = V1, color = term)) + 
+  geom_hline(yintercept = 0, linetype = 2) +
+  facet_grid(term ~ ., scales = "fixed") +
+  labs(
+    title = "Estimated Factor Returns",
+    subtitle = glue("Time Series of Estiamted Factor Returns from Fama French Model"),
+    x = "Date",
+    y = "Average Factor Return",
+    color = "Risk Factor"
+  )
+```
+
+# Portfolio Construction
+
+Plot cumulative returns of your optimal portfolio, compare to two benchmarks ((i)
+equally weighted portfolio, (ii) S&P500 index � on Courseworks in R code folder),
+consider different refinements of your method which can lead to better performance.
+
+```{r}
+df_constructed <- construct_portfolio_variants(df_signals, df_estimated_variance, df_benchmark)
+```
+
+```{r}
+df_plot <- df_constructed %>%
+    .[project_or_benchmark == "Project"] %>%
+    .[date == last_date] %>%
+    .[weight != 0] %>%
+    select_top_bottom_by_group("weight", "portfolio_method", 25) %>%
+    .[, order := frank(., portfolio_method, weight, ties.method = "first") %>% as.character()]
+
+df_plot %>%
+    ggplot() +
+    geom_bar(aes(x = order, y = weight, fill = portfolio_method), stat = "identity", position = "dodge") + 
+    facet_wrap(~portfolio_method, ncol = 1, scales = "free", drop = TRUE) +
+    labs(
+      title = "Portfolio Weights across various Portfolio Methodologies",
+      subtitle = glue("Snapshot of Cross Sectional Weights on {last_date}"),
+      x = "Symbol",
+      y = "Weight"
+    ) +
+    scale_y_continuous(labels = scales::percent) +
+    scale_x_discrete(labels = df_plot[, setNames(symbol, order)]) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+```
+
+```{r}
+df_constructed %>%
+    .[project_or_benchmark == "Project"] %>%
+    .[!is.na(ideal_weight)] %>%
+    melt.data.table(
+      id.vars = c("symbol", "date", "portfolio_method"),
+      measure.vars = c("ideal_weight", "weight"),
+      variable.name = c("ideal_or_actual"),
+      value.name = c("weight")
+    ) %>%
+    .[symbol == "AAPL"] %>%
+    ggplot() +
+    geom_line(aes(x = date, y = weight, color = ideal_or_actual)) +
+    facet_wrap(~portfolio_method, ncol = 1)
+```
+
+```{r}
+df_constructed %>%
+    .[project_or_benchmark == "Project"] %>%
+    .[symbol %in% df_constructed[portfolio_method %like% "Optimized"][weight != 0, sample(unique(symbol), 10, replace = FALSE)]] %>%
+    ggplot() +
+    geom_line(aes(x = date, y = weight, color = symbol)) +
+    facet_wrap(~portfolio_method, ncol = 1, scales = "free") +
+    labs(title = "Portfolio Weights across various Portfolio Methodologies")
+```
+
+# Portfolio Aggregation
+
+```{r}
+df_aggregated <- df_constructed[, aggregate_portfolio(.SD), by = portfolio_method]
+```
+
+```{r}
+df_aggregated %>% 
+    melt.data.table(
+      id.vars = c("date", "portfolio_method"),
+      measure.vars = c("cumulative_portfolio_log_return", "cumulative_portfolio_net_log_return"),
+      variable.name = c("pre_or_post_cost"),
+      value.name = c("cumulative_return")
+    ) %>%
+    ggplot() +
+    geom_line(aes(x = date, y = cumulative_return, color = portfolio_method)) + 
+    facet_wrap(~pre_or_post_cost, ncol = 2) +
+    labs(
+      title = "Cumulative Returns of various Project Portfolios and S&P Benchmark",
+      subtitle = glue("Pre-Cost and Post-Cost Returns of Portfolio Scaled to 15% Annual Volatility from {start_date} to {end_date}"),
+      x = "Date", y = "Cumulative Return", color = "Portfolio Methodology"
+    ) +
+    scale_y_continuous(labels = scales::percent)
+```
+
+```{r}
+df_aggregated %>% 
+    .[date >= max(date) - years(1)] %>%
+    ggplot() +
+    geom_line(aes(x = date, y = portfolio_pecentage_turnover, color = portfolio_method)) +
+    labs(title = "Portfolio Turnover") +
+    scale_y_continuous(labels = scales::percent)
+```
+
+# Portfolio Evaluation
+
+Compute mean return, volatility, Sharpe ratio, Sortino ratio, maximum drawdown,
+and the turnover, of the returns from your portfolio strategy performed in the rolling
+window exercise from (4) and of the two benchmarks from (5).
+
+```{r}
+df_evaluated <- df_aggregated[, evaluate_portfolio(.SD), by = portfolio_method]
+```
+
+```{r}
+df_evaluated %>% 
+    gt() %>%
+    tab_header(
+        title = "Portfolio Evaluation across various Specifications",
+        subtitle = glue::glue(paste(
+          "From {start_date} to {end_date}. Return and Volatility are Annualized.",
+          "Portfolio Scaled to 15% Vol. Measures are post cost unless specified."
+        ))
+    ) %>%
+    fmt_percent(
+        columns = vars(
+            portfolio_mean_return,
+            portfolio_mean_cost,
+            portfolio_cost_percentage,
+            portfolio_post_cost_mean_return,
+            portfolio_volatility,
+            portfolio_average_percentage_turnover,
+            portfolio_max_drawdown,
+        )
+    ) %>%
+    fmt_number(
+        columns = vars(
+            portfolio_sharpe_ratio,
+            portfolio_sortino_ratio
+        ),
+        decimals = 2
+    ) %>%
+    gt::cols_label(
+        portfolio_method = "Portfolio Method",
+        portfolio_mean_return = "Pre-Cost Mean Return",
+        portfolio_mean_cost = "Mean Cost",
+        portfolio_post_cost_mean_return = "Post-Cost Mean Return",
+        portfolio_cost_percentage = "Cost Percentage",
+        portfolio_volatility = "Volatility",
+        portfolio_sharpe_ratio = "Sharpe Ratio",
+        portfolio_sortino_ratio = "Sortino Ratio",
+        portfolio_max_drawdown = "Max Drawdown",
+        portfolio_average_percentage_turnover = "Average Turnover"
+    )
+```

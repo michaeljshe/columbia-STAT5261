@@ -1,0 +1,4 @@
+*.csv
+*.rds
+cache/
+data/
